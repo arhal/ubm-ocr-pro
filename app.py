@@ -1,7 +1,7 @@
 import os
 import base64
 import tempfile
-from flask import Flask, render_template, request, jsonify, flash, redirect, url_for
+from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 from mistralai import Mistral
 
@@ -10,10 +10,11 @@ app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-producti
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
 # Configure upload settings
-UPLOAD_FOLDER = 'uploads'
+UPLOAD_FOLDER = '/tmp' if os.environ.get('VERCEL') else 'uploads'
 ALLOWED_EXTENSIONS = {'pdf'}
 
-if not os.path.exists(UPLOAD_FOLDER):
+# Create uploads directory only if not on Vercel
+if not os.environ.get('VERCEL') and not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -22,11 +23,17 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def process_pdf_ocr(pdf_path):
-    """Process PDF using Mistral OCR"""
+    """Process PDF using Mistral OCR from file path"""
     try:
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
-        
+        return process_pdf_ocr_from_bytes(pdf_bytes)
+    except Exception as e:
+        raise Exception(f"OCR processing failed: {str(e)}")
+
+def process_pdf_ocr_from_bytes(pdf_bytes):
+    """Process PDF using Mistral OCR from bytes"""
+    try:
         b64 = base64.b64encode(pdf_bytes).decode()
         api_key = os.environ.get('MISTRAL_API_KEY', '97ZQlsV45YrDusgZRwjArWGbh3nerFPb')
         client = Mistral(api_key=api_key)
@@ -65,26 +72,32 @@ def upload_file():
     
     if file and allowed_file(file.filename):
         try:
-            # Save uploaded file temporarily
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
-            
-            # Process OCR
-            result = process_pdf_ocr(filepath)
-            
-            # Clean up uploaded file
-            os.remove(filepath)
+            # For Vercel, process file directly from memory
+            if os.environ.get('VERCEL'):
+                # Process PDF directly from uploaded file object
+                pdf_bytes = file.read()
+                result = process_pdf_ocr_from_bytes(pdf_bytes)
+            else:
+                # Save uploaded file temporarily for local/other deployments
+                filename = secure_filename(file.filename)
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(filepath)
+                
+                # Process OCR
+                result = process_pdf_ocr(filepath)
+                
+                # Clean up uploaded file
+                os.remove(filepath)
             
             return jsonify({
                 'success': True,
                 'result': result,
-                'filename': filename
+                'filename': file.filename
             })
             
         except Exception as e:
-            # Clean up file if it exists
-            if os.path.exists(filepath):
+            # Clean up file if it exists (for non-Vercel deployments)
+            if not os.environ.get('VERCEL') and 'filepath' in locals() and os.path.exists(filepath):
                 os.remove(filepath)
             return jsonify({'error': str(e)}), 500
     
